@@ -2,13 +2,13 @@
   "packages": {
     "com.ji2.camera-source": {
       "version": "com.ji2.camera-source-1.0.3.tgz",
-      "url": "dist/com.ji2.camera-source-1.0.3.tgz",
-      "sha512": "07a08935462f4c2b6f5c7ee319fc18f6c8cf0fa7469e91386cada64d734099bb13f3d4d75ded6f4b804ef55c5a720c36efed67179b6184934113e73f8202bf35"
+      "url": "https://vadimcat.github.io/MyUpm/com.ji2.camera-source-1.0.3.tgz",
+      "sha512": "37e4b9bb173a2e937451d18ceb86d249853b28c7d992e1b2b21ca1bf2487ec9a2b4780788fcae55dd9599be3f3845ff31fa8aa8d1042fd3940a52d46fff7deda"
     },
     "com.ji2.screens": {
       "version": "com.ji2.screens-1.0.3.tgz",
-      "url": "dist/com.ji2.screens-1.0.3.tgz",
-      "sha512": "d7b86600a33e53ec9b8c4a7a99fedfa9c22f0b257726aecc5007ceb2c5fcab3baa3f12673aa6a04e6dd17f0d8ce7dd0cf2c91fecf41bb2da1f3032bd916f656c"
+      "url": "https://vadimcat.github.io/MyUpm/com.ji2.screens-1.0.3.tgz",
+      "sha512": "3004c98b6ef0ae1387c208b0b7f06f9de344c2d1630877eed1bfb91eb17cc73579bcd423d7c0dbf4a6ae8e6f28977ef71fc769ccd5d426e2c9c6c93b091189ac"
     }
   }
 }
