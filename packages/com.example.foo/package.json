@@ -1,0 +1,8 @@
+{
+  "name": "com.example.foo",
+  "version": "1.0.0",
+  "displayName": "Foo Package",
+  "description": "Example UPM package",
+  "unity": "2022.1",
+  "dependencies": {}
+}

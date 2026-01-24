@@ -1,0 +1,43 @@
+name: Build and Publish UPM Packages
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup Node
+        uses: actions/setup-node@v3
+      - name: Install jq
+        run: sudo apt-get install jq -y
+      - name: Build tgz from GitHub packages
+        run: |
+          mkdir -p dist
+          cat github-packages.json | jq -c '.[]' | while read pkg; do
+            name=$(echo $pkg | jq -r .name)
+            git=$(echo $pkg | jq -r .git)
+            tag=$(echo $pkg | jq -r .tag)
+            tmpdir=$(mktemp -d)
+            git clone --branch $tag $git $tmpdir
+            tar -czf dist/${name}-${tag}.tgz -C $tmpdir .
+            rm -rf $tmpdir
+          done
+      - name: Generate index.json
+        run: |
+          jq -n '{packages:{}}' > dist/index.json
+          for tgz in dist/*.tgz; do
+            name=$(basename $tgz | sed -E 's/-[v0-9]+\.[0-9]+\.[0-9]+\.tgz//')
+            version=$(basename $tgz | sed -E 's/.*-(v[0-9]+\.[0-9]+\.[0-9]+)\.tgz/\1/')
+            sha=$(sha512sum $tgz | awk '{print $1}')
+            jq --arg n "$name" --arg v "$version" --arg u "$tgz" --arg s "$sha" '.packages[$n]={version:$v,url:$u,sha512:$s}' dist/index.json > dist/tmp.json
+            mv dist/tmp.json dist/index.json
+          done
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
