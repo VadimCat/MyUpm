@@ -1,0 +1,14 @@
+{
+  "packages": {
+    "com.ji2.camera-source": {
+      "version": "com.ji2.camera-source-1.0.3.tgz",
+      "url": "dist/com.ji2.camera-source-1.0.3.tgz",
+      "sha512": "07a08935462f4c2b6f5c7ee319fc18f6c8cf0fa7469e91386cada64d734099bb13f3d4d75ded6f4b804ef55c5a720c36efed67179b6184934113e73f8202bf35"
+    },
+    "com.ji2.screens": {
+      "version": "com.ji2.screens-1.0.3.tgz",
+      "url": "dist/com.ji2.screens-1.0.3.tgz",
+      "sha512": "d7b86600a33e53ec9b8c4a7a99fedfa9c22f0b257726aecc5007ceb2c5fcab3baa3f12673aa6a04e6dd17f0d8ce7dd0cf2c91fecf41bb2da1f3032bd916f656c"
+    }
+  }
+}
