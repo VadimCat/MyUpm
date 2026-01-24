@@ -28,14 +28,20 @@ jobs:
           done
       - name: Generate index.json
         run: |
-          jq -n '{packages:{}}' > dist/index.json
-          for tgz in dist/*.tgz; do
-            name=$(basename $tgz | sed -E 's/-[v0-9]+\.[0-9]+\.[0-9]+\.tgz//')
-            version=$(basename $tgz | sed -E 's/.*-(v[0-9]+\.[0-9]+\.[0-9]+)\.tgz/\1/')
-            sha=$(sha512sum $tgz | awk '{print $1}')
-            jq --arg n "$name" --arg v "$version" --arg u "$tgz" --arg s "$sha" '.packages[$n]={version:$v,url:$u,sha512:$s}' dist/index.json > dist/tmp.json
-            mv dist/tmp.json dist/index.json
-          done
+            BASE_URL="https://vadimcat.github.io/MyUpm"
+            jq -n '{packages:{}}' > dist/index.json
+            for tgz in dist/*.tgz; do
+            # получаем имя пакета и версию
+              name=$(basename $tgz | sed -E 's/-[v0-9]+\.[0-9]+\.[0-9]+\.tgz//')
+              version=$(basename $tgz | sed -E 's/.*-(v[0-9]+\.[0-9]+\.[0-9]+)\.tgz/\1/')
+              sha=$(sha512sum $tgz | awk '{print $1}')
+              # создаём полный URL для Unity
+              url="$BASE_URL/$(basename $tgz)"
+              # записываем пакет в index.json
+              jq --arg n "$name" --arg v "$version" --arg u "$url" --arg s "$sha" \
+               '.packages[$n]={version:$v,url:$u,sha512:$s}' dist/index.json > dist/tmp.json
+              mv dist/tmp.json dist/index.json
+            done
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
