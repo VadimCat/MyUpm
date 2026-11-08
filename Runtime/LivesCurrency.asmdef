@@ -1,0 +1,23 @@
+{
+    "name": "LivesCurrency",
+    "rootNamespace": "",
+    "references": [
+        "Currency",
+        "Ji2.Saves",
+        "ReactivePropety",
+        "UniTask",
+        "VContainer",
+        "Unity.TextMeshPro",
+        "Rive.Runtime",
+        "Rive.Runtime.Components"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

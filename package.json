@@ -1,0 +1,10 @@
+{
+  "name": "com.ji2.currency-lives",
+  "version": "1.0.0",
+  "displayName": "Ji2 Lives Currency",
+  "description": "Lives currency module.",
+  "unity": "2022.3",
+  "author": {
+    "name": "Ji2"
+  }
+}
