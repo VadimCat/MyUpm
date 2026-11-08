@@ -1,0 +1,7 @@
+{
+  "name": "Ads",
+  "references": [
+    "UniTask"
+  ],
+  "autoReferenced": true
+}

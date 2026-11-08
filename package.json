@@ -1,0 +1,10 @@
+{
+  "name": "com.ji2.ads",
+  "version": "1.0.0",
+  "displayName": "Ji2 Ads",
+  "description": "Ads abstraction and providers.",
+  "unity": "2022.3",
+  "author": {
+    "name": "Ji2"
+  }
+}
