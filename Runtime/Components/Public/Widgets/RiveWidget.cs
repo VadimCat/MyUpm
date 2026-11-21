@@ -46,29 +46,39 @@ namespace Rive.Components
         public enum DataBindingPropertyCallbackApproach
         {
             /// <summary>
-            /// Legacy behavior. Callbacks are handled by propagating from the root ViewModelInstance
-            /// after advancing a specific state machine (per-widget).
+            /// Deprecated. Propagates callbacks from the root ViewModelInstance after each
+            /// widget tick. Does not deliver callbacks for global view model properties.
             /// </summary>
             Propagation = 0,
 
             /// <summary>
-            /// Orchestrator behavior. Callbacks are triggered after
-            /// all panels/widgets have ticked.
+            /// Supported path. Flushes callbacks after all panels/widgets have ticked,
+            /// including properties on global view models.
             /// </summary>
             Orchestrator = 1,
         }
 
+        // Package code reads/writes this field to avoid obsolete warnings on the public property.
+        internal static DataBindingPropertyCallbackApproach propertyCallbackApproach =
+            DataBindingPropertyCallbackApproach.Orchestrator;
+
         /// <summary>
-        /// Temporary fallback hatch for callback handling. Defaults to <see cref="DataBindingPropertyCallbackApproach.Orchestrator"/>.
+        /// Temporary fallback for callback handling. Defaults to
+        /// <see cref="DataBindingPropertyCallbackApproach.Orchestrator"/>.
         /// </summary>
-        public static DataBindingPropertyCallbackApproach PropertyCallbackApproach { get; set; } = DataBindingPropertyCallbackApproach.Orchestrator;
+        [Obsolete("PropertyCallbackApproach is deprecated. Orchestrator is the default and supported path; Propagation does not deliver callbacks for new features related to view model instances.")]
+        public static DataBindingPropertyCallbackApproach PropertyCallbackApproach
+        {
+            get => propertyCallbackApproach;
+            set => propertyCallbackApproach = value;
+        }
 
 #if UNITY_EDITOR
         // Account for Editor Domain Reload being disabled (static state persists across play sessions).
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         private static void ResetStaticState()
         {
-            PropertyCallbackApproach = DataBindingPropertyCallbackApproach.Orchestrator;
+            propertyCallbackApproach = DataBindingPropertyCallbackApproach.Orchestrator;
         }
 #endif
 
@@ -263,6 +273,9 @@ namespace Rive.Components
             }
         }
 
+        [Obsolete("This property is a temporary fallback for the old behavior and will be removed in a future version.")]
+        public static bool ShouldAdvanceAfterPointerEvent { get; set; } = true;
+
 
         private ArtboardLoadHelper Controller
         {
@@ -394,6 +407,9 @@ namespace Rive.Components
         /// The asset that is currently loaded.
         /// </summary>
         public Asset Asset { get => m_asset; }
+
+        // False when the loaded file was passed in directly, so it may not match Asset.
+        internal bool IsFileLoadedFromAsset => m_fileLoadedFromAsset != null && ReferenceEquals(m_fileLoadedFromAsset, m_asset);
 
 
         private ArtboardRenderObject RenderObjectWithArtboard => Controller?.RenderObject;
@@ -678,7 +694,26 @@ namespace Rive.Components
             return StateMachine.HitTest(rivePoint);
         }
 
+        /// <summary>
+        /// Advances the state machine after a pointer event occurs on the widget. This is needed to ensure that intermediate state, such as a view model property set on pointer down, is processed immediately, even when the down and up occur within the same frame.
+        /// </summary>
+        private void AdvanceAfterPointerEvent()
+        {
+#pragma warning disable 0618 // Disable obsolete warning
+            if (Controller == null || Status != WidgetStatus.Loaded || !ShouldAdvanceAfterPointerEvent)
+            {
+                return;
+            }
 
+            bool hasEventListeners = OnRiveEventReported != null;
+            Controller.Tick(0f, ReportedEventPoolingMode, Speed, hasEventListeners);
+            if (propertyCallbackApproach == DataBindingPropertyCallbackApproach.Orchestrator)
+            {
+                Orchestrator.Instance?.FlushPropertyCallbacksForImmediateAdvance();
+            }
+            TriggerRedrawNeededEvent();
+#pragma warning restore 0618
+        }
 
 
         public override bool OnPointerDown(Vector2 normalizedPointInRect, int pointerId)
@@ -694,6 +729,10 @@ namespace Rive.Components
             }
 
             HitResult hitResult = StateMachine.PointerDown(rivePoint, pointerId);
+            if (hitResult != HitResult.None)
+            {
+                AdvanceAfterPointerEvent();
+            }
 
             return hitResult != HitResult.None;
         }
@@ -716,6 +755,10 @@ namespace Rive.Components
             }
 
             HitResult hitResult = StateMachine.PointerUp(rivePoint, pointerId);
+            if (hitResult != HitResult.None)
+            {
+                AdvanceAfterPointerEvent();
+            }
 
             return hitResult != HitResult.None;
 
@@ -817,8 +860,6 @@ namespace Rive.Components
         /// Loads a Rive file and specified artboard and state machine.
         /// </summary>
         /// <param name="file"> The Rive file to load.</param>
-        /// <param name="fit"> The fit mode to use.</param>
-        /// <param name="alignment"> The alignment to use.</param>
         /// <param name="artboardName"> The name of the artboard to load.</param>
         /// <param name="stateMachineName"> The name of the state machine to load.</param>
         public void Load(File file, string artboardName, string stateMachineName)
@@ -830,7 +871,6 @@ namespace Rive.Components
 
             LoadInternal(file, null);
         }
-
 
         /// <summary>
         /// Loads a Rive file using the default artboard and state machine.

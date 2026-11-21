@@ -69,6 +69,7 @@ namespace Rive
             renderQueueDrawArtboard(m_nativeRenderQueue, m_index, artboard.NativeArtboard);
         }
 
+#pragma warning disable CS0618 // Low-level procedural drawing API is deprecated but still used internally
         /// <summary>
         /// Draw the given path and paint to the render queue.
         /// </summary>
@@ -84,6 +85,7 @@ namespace Rive
         {
             renderQueueClipPath(m_nativeRenderQueue, m_index, path.NativePath);
         }
+#pragma warning restore CS0618
 
         /// <summary>
         /// Save the current render queue state.
@@ -333,7 +335,7 @@ namespace Rive
         [DllImport(NativeLibrary.name)]
         internal static extern void setRenderQueueArtboardDirtCheckEnabled(
             IntPtr renderQueue,
-            bool enabled
+            [MarshalAs(UnmanagedType.U1)] bool enabled
         );
 
 
@@ -620,7 +622,7 @@ namespace Rive
             IntPtr renderTexture,
             uint width,
             uint height,
-            bool clear
+            [MarshalAs(UnmanagedType.U1)] bool clear
         );
 
         [DllImport(NativeLibrary.name)]
@@ -635,6 +637,7 @@ namespace Rive
         );
 
         [DllImport(NativeLibrary.name)]
+        [return: MarshalAs(UnmanagedType.U1)]
         public static extern bool supportsDrawingToScreen();
         #endregion
     }

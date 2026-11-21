@@ -17,8 +17,11 @@ namespace Rive
     {
 #if UNITY_EDITOR
 
-        private const int CURRENT_VERSION = 1;      // Increment this whenever the structure changes 
-        [SerializeField] private int m_Version = 1; //And also update this so we can check for changes in the future
+        private const int CURRENT_VERSION = 2; // Increment this whenever the structure changes, so previously imported assets regenerate.
+
+        // Stamped when metadata is generated. Deserialized assets keep the version they were written
+        // with, which is what NeedsReload compares against.
+        [SerializeField] private int m_Version = CURRENT_VERSION;
 
         [Serializable]
         public class InputMetadata
@@ -201,6 +204,11 @@ namespace Rive
 
         public List<ViewModelEnumMetadata> Enums = new List<ViewModelEnumMetadata>();
 
+        /// <summary>
+        /// Names of the file's global view models, in file order. Empty when the file has none.
+        /// </summary>
+        public List<string> GlobalViewModelNames = new List<string>();
+
         public string[] GetArtboardNames()
         {
             return Artboards.Select(a => a.Name).ToArray();
@@ -221,6 +229,91 @@ namespace Rive
         {
             // Force reload for unversioned (0) or outdated data
             return m_Version != CURRENT_VERSION;
+        }
+
+        /// <summary>
+        /// Builds metadata from an already loaded file.
+        /// </summary>
+        internal static FileMetadata FromFile(File file)
+        {
+            if (file == null) return null;
+
+            var metadata = new FileMetadata();
+
+            // View models
+
+            IReadOnlyList<ViewModel> viewModels = file.ViewModels;
+
+            foreach (var viewModel in viewModels)
+            {
+                var viewModelMeta = FileMetadata.ViewModelMetadata.FromViewModel(viewModel);
+
+                metadata.ViewModels.Add(viewModelMeta);
+            }
+
+            // Global view models (names only; property/instance detail lives on ViewModels)
+
+            IReadOnlyList<string> globalViewModelNames = file.GlobalViewModelNames;
+            for (int i = 0; i < globalViewModelNames.Count; i++)
+            {
+                metadata.GlobalViewModelNames.Add(globalViewModelNames[i]);
+            }
+
+            // Enums
+
+            foreach (var enumData in file.ViewModelEnums)
+            {
+                var enumMeta = new FileMetadata.ViewModelEnumMetadata(enumData.Name, enumData.Values);
+                metadata.Enums.Add(enumMeta);
+            }
+
+
+            for (uint i = 0; i < file.ArtboardCount; i++)
+            {
+                var artboard = file.Artboard(i);
+                if (artboard == null) continue;
+
+                FileMetadata.ViewModelMetadata defaultViewModel = null;
+
+                if (artboard.DefaultViewModel != null)
+                {
+                    defaultViewModel = FileMetadata.ViewModelMetadata.FromViewModel(artboard.DefaultViewModel);
+
+                }
+
+                var artboardMeta = new FileMetadata.ArtboardMetadata(name: file.ArtboardName(i), width: artboard.Width, height: artboard.Height, stateMachines: new List<FileMetadata.StateMachineMetadata>(), defaultViewModel: defaultViewModel);
+
+
+                for (uint j = 0; j < artboard.StateMachineCount; j++)
+                {
+                    var stateMachine = artboard.StateMachine(j);
+                    if (stateMachine == null) continue;
+
+                    var smMeta = new FileMetadata.StateMachineMetadata
+                    {
+                        Name = artboard.StateMachineName(j)
+                    };
+
+                    foreach (var input in stateMachine.Inputs())
+                    {
+                        var inputMeta = new FileMetadata.InputMetadata
+                        {
+                            Name = input.Name,
+                            Type = input.IsBoolean ? "Boolean" :
+                                   input.IsNumber ? "Number" :
+                                   input.IsTrigger ? "Trigger" : "Unknown"
+                        };
+                        smMeta.Inputs.Add(inputMeta);
+                    }
+
+
+                    artboardMeta.StateMachines.Add(smMeta);
+                }
+
+                metadata.Artboards.Add(artboardMeta);
+            }
+
+            return metadata;
         }
 #endif
     }
@@ -275,76 +368,9 @@ namespace Rive
 
         private void GenerateFileMetadata()
         {
-            m_FileMetadata = new FileMetadata();
-
             using (var file = File.Load(this))
             {
-                if (file == null) return;
-
-                // View models
-
-                IReadOnlyList<ViewModel> viewModels = file.ViewModels;
-
-                foreach (var viewModel in viewModels)
-                {
-                    var viewModelMeta = FileMetadata.ViewModelMetadata.FromViewModel(viewModel);
-
-                    m_FileMetadata.ViewModels.Add(viewModelMeta);
-                }
-
-                // Enums
-
-                foreach (var enumData in file.ViewModelEnums)
-                {
-                    var enumMeta = new FileMetadata.ViewModelEnumMetadata(enumData.Name, enumData.Values);
-                    m_FileMetadata.Enums.Add(enumMeta);
-                }
-
-
-                for (uint i = 0; i < file.ArtboardCount; i++)
-                {
-                    var artboard = file.Artboard(i);
-                    if (artboard == null) continue;
-
-                    FileMetadata.ViewModelMetadata defaultViewModel = null;
-
-                    if (artboard.DefaultViewModel != null)
-                    {
-                        defaultViewModel = FileMetadata.ViewModelMetadata.FromViewModel(artboard.DefaultViewModel);
-
-                    }
-
-                    var artboardMeta = new FileMetadata.ArtboardMetadata(name: file.ArtboardName(i), width: artboard.Width, height: artboard.Height, stateMachines: new List<FileMetadata.StateMachineMetadata>(), defaultViewModel: defaultViewModel);
-
-
-                    for (uint j = 0; j < artboard.StateMachineCount; j++)
-                    {
-                        var stateMachine = artboard.StateMachine(j);
-                        if (stateMachine == null) continue;
-
-                        var smMeta = new FileMetadata.StateMachineMetadata
-                        {
-                            Name = artboard.StateMachineName(j)
-                        };
-
-                        foreach (var input in stateMachine.Inputs())
-                        {
-                            var inputMeta = new FileMetadata.InputMetadata
-                            {
-                                Name = input.Name,
-                                Type = input.IsBoolean ? "Boolean" :
-                                       input.IsNumber ? "Number" :
-                                       input.IsTrigger ? "Trigger" : "Unknown"
-                            };
-                            smMeta.Inputs.Add(inputMeta);
-                        }
-
-
-                        artboardMeta.StateMachines.Add(smMeta);
-                    }
-
-                    m_FileMetadata.Artboards.Add(artboardMeta);
-                }
+                m_FileMetadata = FileMetadata.FromFile(file) ?? new FileMetadata();
             }
         }
 #endif

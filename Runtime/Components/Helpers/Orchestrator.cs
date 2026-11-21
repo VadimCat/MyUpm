@@ -77,9 +77,17 @@ namespace Rive.Components
         {
             m_tickedThisFrame = false;
 
+
             if (s_instance == this)
             {
                 s_instance = null;
+
+#if RIVE_USING_EXPERIMENTAL
+            // Session teardown: dispose any RenderTexture-backed
+            // images still bound.
+            RenderTextureImageManager.Instance.Clear();
+#endif
+
             }
         }
 
@@ -217,6 +225,10 @@ namespace Rive.Components
 
         private void Update()
         {
+#if RIVE_USING_EXPERIMENTAL
+
+            RenderTextureImageManager.Instance.Tick(); // Doing this before the panels are ticked ensures the images show up on the initial frame.
+#endif
             // We advance any Rive Panels set to Auto update mode. Manual panels notify the orchestrator when they tick via NotifyManualTickOccurred.
             if (TickAutoPanels())
             {
@@ -228,27 +240,43 @@ namespace Rive.Components
         }
 
         /// <summary>
-        /// Captures changed properties and triggers the Unity callbacks. This only triggers/checks for properties the user has subscribed to in code.
+        /// Captures changed properties and triggers Unity callbacks after an immediate state machine advance.
         /// </summary>
+        internal void FlushPropertyCallbacksForImmediateAdvance()
+        {
+            FlushPropertyCallbacksForChangedProperties();
+        }
+
         private void TriggerCallbacksForChangedProperties()
         {
-            if (RiveWidget.PropertyCallbackApproach == RiveWidget.DataBindingPropertyCallbackApproach.Orchestrator && m_tickedThisFrame)
+            if (RiveWidget.propertyCallbackApproach == RiveWidget.DataBindingPropertyCallbackApproach.Orchestrator && m_tickedThisFrame)
             {
-                if (PropertyCallbacksHub.Instance.CaptureChanges())
-                {
-                    PropertyCallbacksHub.Instance.FlushCapturedCallbacks(); // This triggers the Unity callbacks.
-                }
-
+                FlushPropertyCallbacksForChangedProperties();
             }
             m_tickedThisFrame = false;
 
+        }
+
+        /// <summary>
+        /// Captures changed properties and triggers the Unity callbacks. This only triggers/checks for properties the user has subscribed to in code.
+        /// </summary>
+        private void FlushPropertyCallbacksForChangedProperties()
+        {
+            if (RiveWidget.propertyCallbackApproach != RiveWidget.DataBindingPropertyCallbackApproach.Orchestrator)
+            {
+                return;
+            }
+
+            if (PropertyCallbacksHub.Instance.CaptureChanges())
+            {
+                PropertyCallbacksHub.Instance.FlushCapturedCallbacks(); // This triggers the Unity callbacks.
+            }
         }
 
 
 
         private void LateUpdate()
         {
-
             // Prepare batched rendering after ticking panels.
             // This is intentionally called every frame so batched render requests (e.g. from
             // registration/size/layout changes) can be handled even when no panels ticked.
@@ -282,4 +310,3 @@ namespace Rive.Components
 #endif
     }
 }
-

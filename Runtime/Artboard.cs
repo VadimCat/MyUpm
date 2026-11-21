@@ -40,6 +40,11 @@ namespace Rive
         }
 
         /// <summary>
+        /// The file that instanced this artboard, or null if it has already been collected.
+        /// </summary>
+        internal File File => m_file != null && m_file.TryGetTarget(out var file) ? file : null;
+
+        /// <summary>
         /// Dispose of the Artboard and release native resources.
         /// </summary>
         public void Dispose()
@@ -113,7 +118,7 @@ namespace Rive
         }
 
         /// <summary>
-        /// Returns true if the artboard has audio.
+        /// Returns true if the artboard or the file it was loaded from has audio.
         /// </summary>
         public bool HasAudio
         {
@@ -201,6 +206,17 @@ namespace Rive
 
 
         /// <summary>
+        /// True if this artboard has a view model linked in the Rive file.
+        /// </summary>
+        internal bool HasDefaultViewModel
+        {
+            get
+            {
+                return artboardHasDefaultViewModel(m_nativeArtboard);
+            }
+        }
+
+        /// <summary>
         /// The default ViewModel for the artboard.
         /// </summary>
         public ViewModel DefaultViewModel
@@ -209,6 +225,11 @@ namespace Rive
             {
                 if (m_defaultViewModel == null)
                 {
+                    if (!HasDefaultViewModel)
+                    {
+                        return null;
+                    }
+
                     var file = m_file.TryGetTarget(out var target) ? target : null;
                     if (file != null)
                     {
@@ -235,7 +256,7 @@ namespace Rive
                 DebugLogger.Instance.Log($"No StateMachine at index {index}.");
                 return null;
             }
-            return new StateMachine(ptr);
+            return new StateMachine(ptr, this);
         }
 
         /// Instance a StateMachine from the Artboard.
@@ -247,7 +268,7 @@ namespace Rive
                 DebugLogger.Instance.Log($"No StateMachine named \"{name}\".");
                 return null;
             }
-            return new StateMachine(ptr);
+            return new StateMachine(ptr, this);
         }
 
         /// Instance the default StateMachine from the Artboard.
@@ -259,7 +280,7 @@ namespace Rive
                 DebugLogger.Instance.Log($"No default StateMachine found.");
                 return null;
             }
-            return new StateMachine(ptr);
+            return new StateMachine(ptr, this);
         }
 
         public void SetAudioEngine(AudioEngine audioEngine)
@@ -481,6 +502,7 @@ namespace Rive
         internal static extern float getArtboardHeight(IntPtr artboard);
 
         [DllImport(NativeLibrary.name)]
+        [return: MarshalAs(UnmanagedType.U1)]
         internal static extern bool artboardDidChange(IntPtr artboard);
 
 
@@ -525,12 +547,14 @@ namespace Rive
         internal static extern void setArtboardAudioEngine(IntPtr artboard, IntPtr audioEngine);
 
         [DllImport(NativeLibrary.name)]
+        [return: MarshalAs(UnmanagedType.U1)]
         internal static extern bool artboardHasAudio(IntPtr artboard);
 
         [DllImport(NativeLibrary.name)]
         internal static extern IntPtr artboardComponentNamed(IntPtr artboard, string name);
 
         [DllImport(NativeLibrary.name)]
+        [return: MarshalAs(UnmanagedType.U1)]
         internal static extern bool artboardSetRunValue(
             IntPtr artboard,
             string runName,
@@ -544,6 +568,7 @@ namespace Rive
         internal static extern IntPtr artboardGetTextRunValue(IntPtr artboard, string runName);
 
         [DllImport(NativeLibrary.name)]
+        [return: MarshalAs(UnmanagedType.U1)]
         internal static extern bool artboardSetTextRunValueAtPath(IntPtr artboard, string runName, string path, string text);
 
         [DllImport(NativeLibrary.name)]
@@ -555,6 +580,10 @@ namespace Rive
 
         // Data binding
 
+
+        [DllImport(NativeLibrary.name)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        internal static extern bool artboardHasDefaultViewModel(IntPtr artboard);
 
         [DllImport(NativeLibrary.name)]
         internal static extern void bindViewModelInstanceToArtboard(IntPtr artboard, ViewModelInstanceSafeHandle viewModelInstance);

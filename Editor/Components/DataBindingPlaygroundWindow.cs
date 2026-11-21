@@ -39,8 +39,15 @@ namespace Rive.EditorTools
 
         private FileMetadata m_fileMetadata;
         private FileMetadata.ArtboardMetadata m_artboardMetadata;
+        // What the metadata was built against, so we can rebuild when the widget loads something else.
+        private File m_metadataFile;
+        private Artboard m_metadataArtboard;
+        // Metadata for files passed to RiveWidget.Load(File) rather than loaded from the widget's asset.
+        private File m_loadedFileMetadataSource;
+        private FileMetadata m_loadedFileMetadata;
         private double m_nextRefreshTime;
         private readonly Dictionary<string, ImageOutOfBandAsset> m_imageSelectionCache = new Dictionary<string, ImageOutOfBandAsset>();
+        private readonly Dictionary<string, FontOutOfBandAsset> m_fontSelectionCache = new Dictionary<string, FontOutOfBandAsset>();
         private readonly Dictionary<string, ArtboardSelection> m_artboardSelectionCache = new Dictionary<string, ArtboardSelection>();
         private readonly Dictionary<string, bool> m_viewModelExpansion = new Dictionary<string, bool>();
 
@@ -78,6 +85,10 @@ namespace Rive.EditorTools
         }
 
         private const string DocsBaseUrl = InspectorDocLinks.UnityDataBinding;
+
+        // Prefixes cache keys for global view models so their property paths can never collide with
+        // the main view model's, which are rooted at the empty string.
+        private const string GlobalCachePrefix = "$globals";
 
         private class PropertyBinding
         {
@@ -380,12 +391,23 @@ namespace Rive.EditorTools
             m_propertyBindings.Clear();
             m_listBindings.Clear();
             m_widget = null;
+            m_metadataFile = null;
+            m_metadataArtboard = null;
+            m_loadedFileMetadataSource = null;
+            m_loadedFileMetadata = null;
+            ClearArtboardSelections();
+            m_viewModelExpansion.Clear();
+        }
+
+        // Rebuilt artboard rows apply their cached selection on first sync, so we clear it
+        // whenever the rows are built for a different instance.
+        private void ClearArtboardSelections()
+        {
             foreach (var selection in m_artboardSelectionCache.Values)
             {
                 selection.DisposeAll();
             }
             m_artboardSelectionCache.Clear();
-            m_viewModelExpansion.Clear();
         }
 
         private void EditorUpdate()
@@ -397,8 +419,49 @@ namespace Rive.EditorTools
             }
 
             m_nextRefreshTime = EditorApplication.timeSinceStartup + 0.25f;
+            RebuildIfWidgetReloaded();
             UpdateVisibility();
             RefreshValues();
+        }
+
+        // True when the rows were built for a file or artboard the widget no longer has loaded.
+        private bool WidgetReloadedSinceBuild()
+        {
+            return m_widget != null &&
+                (!ReferenceEquals(m_widget.File, m_metadataFile) || !ReferenceEquals(m_widget.Artboard, m_metadataArtboard));
+        }
+
+        private void RebuildIfWidgetReloaded()
+        {
+            if (WidgetReloadedSinceBuild())
+            {
+                ClearArtboardSelections();
+                RefreshMetadata();
+                RebuildProperties();
+            }
+        }
+
+        /// Tests. Targets a widget, as picking it in the window does.
+        internal void SetTargetForTests(RiveWidget widget) => SetTarget(widget);
+
+        /// Tests. One refresh, as the editor update runs it.
+        internal void RefreshForTests()
+        {
+            RebuildIfWidgetReloaded();
+            RefreshValues();
+        }
+
+        /// Tests. The control of the row for a property path, or null.
+        internal VisualElement RowControlForTests(string path)
+        {
+            foreach (var binding in m_propertyBindings)
+            {
+                if (binding.Path == path)
+                {
+                    return binding.Control;
+                }
+            }
+            return null;
         }
 
         private void BuildLayout()
@@ -433,7 +496,7 @@ namespace Rive.EditorTools
 
             m_playModeHelpBox = new HelpBox(
                 "Play with data binding values for the selected RiveWidget while in Play Mode. " +
-                "Changes are applied to the widget's current ViewModel instance.",
+                "Changes are applied to the widget's current ViewModel instance and to the file's global view models.",
                 HelpBoxMessageType.Info);
 
             m_playModeHelpBox.style.marginBottom = 10;
@@ -471,6 +534,7 @@ namespace Rive.EditorTools
         {
             m_widget = widget;
             m_widgetField?.SetValueWithoutNotify(widget);
+            ClearArtboardSelections();
             RefreshMetadata();
             RebuildProperties();
             UpdateVisibility();
@@ -479,7 +543,9 @@ namespace Rive.EditorTools
 
         private void RefreshMetadata()
         {
-            m_fileMetadata = m_widget?.Asset?.EditorOnlyMetadata;
+            m_metadataFile = m_widget?.File;
+            m_metadataArtboard = m_widget?.Artboard;
+            m_fileMetadata = GetWidgetFileMetadata();
             m_artboardMetadata = null;
 
             if (m_fileMetadata == null)
@@ -487,14 +553,42 @@ namespace Rive.EditorTools
                 return;
             }
 
-            var artboardName = !string.IsNullOrEmpty(m_widget?.ArtboardName)
-                ? m_widget.ArtboardName
-                : m_fileMetadata.GetArtboardNames().FirstOrDefault();
+            // The loaded artboard is the source of truth. ArtboardName is empty after Load(File).
+            var artboardName = m_metadataArtboard?.Name;
+            if (string.IsNullOrEmpty(artboardName))
+            {
+                artboardName = !string.IsNullOrEmpty(m_widget?.ArtboardName)
+                    ? m_widget.ArtboardName
+                    : m_fileMetadata.GetArtboardNames().FirstOrDefault();
+            }
 
             if (!string.IsNullOrEmpty(artboardName))
             {
                 m_artboardMetadata = m_fileMetadata.GetArtboard(artboardName);
             }
+        }
+
+        private FileMetadata GetWidgetFileMetadata()
+        {
+            if (m_widget == null)
+            {
+                return null;
+            }
+
+            var file = m_widget.File;
+            if (file == null || m_widget.IsFileLoadedFromAsset)
+            {
+                return m_widget.Asset?.EditorOnlyMetadata;
+            }
+
+            // The user loaded this file themselves, so the asset (if any) may not match it.
+            if (!ReferenceEquals(file, m_loadedFileMetadataSource))
+            {
+                m_loadedFileMetadataSource = file;
+                m_loadedFileMetadata = FileMetadata.FromFile(file);
+            }
+
+            return m_loadedFileMetadata;
         }
 
         private void RebuildProperties()
@@ -517,17 +611,107 @@ namespace Rive.EditorTools
                 return;
             }
 
+            bool hasGlobals = HasGlobalViewModels();
+
             if (m_artboardMetadata.DefaultViewModel == null)
             {
-                m_propertiesScroll.Add(new HelpBox("The current artboard does not have a default ViewModel.", HelpBoxMessageType.Warning));
-                return;
+                if (!hasGlobals)
+                {
+                    m_propertiesScroll.Add(new HelpBox("The current artboard does not have a default ViewModel.", HelpBoxMessageType.Warning));
+                    return;
+                }
+
+                // An artboard without its own view model can still be driven by the file's globals.
+                m_propertiesScroll.Add(new HelpBox(
+                    "The current artboard does not have a default ViewModel, so only global view models are shown.",
+                    HelpBoxMessageType.Info));
+            }
+            else
+            {
+                BuildViewModelSection(
+                    m_artboardMetadata.DefaultViewModel,
+                    string.Empty,
+                    m_propertiesScroll,
+                    0);
             }
 
-            BuildViewModelSection(
-                m_artboardMetadata.DefaultViewModel,
-                string.Empty,
-                m_propertiesScroll,
-                0);
+            if (hasGlobals)
+            {
+                BuildGlobalViewModelSections();
+            }
+        }
+
+        /// <summary>
+        /// Builds one editable section per global view model in the file. Globals hang off the state
+        /// machine rather than the artboard's view model, so each gets its own instance provider and
+        /// its own cache prefix.
+        /// </summary>
+        private void BuildGlobalViewModelSections()
+        {
+            var header = new Label("Global View Models");
+            header.style.unityFontStyleAndWeight = FontStyle.Bold;
+            header.style.marginTop = 14;
+            m_propertiesScroll.Add(header);
+
+            var subtitle = new Label(
+                "View models marked global in the Rive Editor");
+            subtitle.style.fontSize = 11;
+            subtitle.style.color = new UnityEngine.Color(0.75f, 0.75f, 0.75f, 0.9f);
+            subtitle.style.whiteSpace = WhiteSpace.Normal;
+            m_propertiesScroll.Add(subtitle);
+
+            foreach (var name in m_fileMetadata.GlobalViewModelNames)
+            {
+                if (string.IsNullOrEmpty(name))
+                {
+                    continue;
+                }
+
+                var meta = FindViewModelMetadata(name);
+                if (meta == null)
+                {
+                    m_propertiesScroll.Add(new HelpBox(
+                        $"No metadata found for global view model '{name}'. Reimport the Rive asset.",
+                        HelpBoxMessageType.Warning));
+                    continue;
+                }
+
+                string globalName = name;
+                string cachePrefix = $"{GlobalCachePrefix}/{globalName}";
+
+                // Nothing is bound until the state machine binds, which never happens in Manual mode.
+                // The section's controls disable themselves, so we show a notice.
+                var unboundNotice = new HelpBox(
+                    $"No instance is bound for '{globalName}' yet. Bind one with " +
+                    "StateMachine.BindViewModelInstance to edit it here.",
+                    HelpBoxMessageType.Info);
+                unboundNotice.style.display = DisplayStyle.None;
+                unboundNotice.style.marginTop = 8;
+                m_propertiesScroll.Add(unboundNotice);
+
+                m_propertyBindings.Add(new PropertyBinding
+                {
+                    Path = $"{cachePrefix}/$bound",
+                    Control = unboundNotice,
+                    Sync = _ => unboundNotice.style.display =
+                        GetGlobalInstance(globalName) == null ? DisplayStyle.Flex : DisplayStyle.None
+                });
+
+                BuildViewModelSection(
+                    meta,
+                    string.Empty,
+                    m_propertiesScroll,
+                    0,
+                    () => GetGlobalInstance(globalName),
+                    cachePathPrefix: cachePrefix,
+                    isGlobal: true);
+            }
+        }
+
+        private bool HasGlobalViewModels()
+        {
+            var names = m_fileMetadata?.GlobalViewModelNames;
+            return names != null && names.Count > 0;
         }
 
         private FileMetadata.ViewModelMetadata FindViewModelMetadata(string viewModelName, FileMetadata metadataContext = null)
@@ -758,6 +942,65 @@ namespace Rive.EditorTools
             });
 
             parent.Add(CreatePropertyCard(displayName, pathLabelOverride ?? path, "Image", GetDocUrl(ViewModelDataType.AssetImage),
+                null, field));
+        }
+
+        private void AddFontField(VisualElement parent, string path, string displayName, Func<ViewModelInstance> instanceProvider = null, string cacheKey = null, string pathLabelOverride = null, List<PropertyBinding> bindingList = null)
+        {
+            instanceProvider ??= GetCurrentInstance;
+            cacheKey ??= path;
+            bindingList ??= m_propertyBindings;
+
+            var field = new ObjectField
+            {
+                objectType = typeof(FontOutOfBandAsset),
+                allowSceneObjects = false
+            };
+
+            field.RegisterValueChangedCallback(evt =>
+            {
+                var instance = instanceProvider();
+                var prop = instance?.GetFontProperty(path);
+                if (prop == null)
+                {
+                    return;
+                }
+
+                var asset = evt.newValue as FontOutOfBandAsset;
+                if (asset == null)
+                {
+                    m_fontSelectionCache[cacheKey] = null;
+                    prop.Value = null;
+                    return;
+                }
+
+                m_fontSelectionCache[cacheKey] = asset;
+                asset.Load();
+                prop.Value = asset;
+                asset.Unload();
+            });
+
+            bindingList.Add(new PropertyBinding
+            {
+                Path = cacheKey,
+                Control = field,
+                Sync = instance =>
+                {
+                    var current = instanceProvider();
+                    var prop = current?.GetFontProperty(path);
+                    field.SetEnabled(prop != null);
+                    if (m_fontSelectionCache.TryGetValue(cacheKey, out var cached))
+                    {
+                        field.SetValueWithoutNotify(cached);
+                    }
+                    else
+                    {
+                        field.SetValueWithoutNotify(null);
+                    }
+                }
+            });
+
+            parent.Add(CreatePropertyCard(displayName, pathLabelOverride ?? path, "Font", GetDocUrl(ViewModelDataType.AssetFont),
                 null, field));
         }
 
@@ -1628,7 +1871,7 @@ namespace Rive.EditorTools
 
             if (m_fileMetadata == null)
             {
-                message = "Selected Rive file has no metadata yet. Reimport or select a Rive asset.";
+                message = "Selected Rive file has no metadata yet. Reimport the Rive asset or load a file into the widget.";
                 return PlaygroundState.NoFileMetadata;
             }
 
@@ -1644,7 +1887,11 @@ namespace Rive.EditorTools
                 return PlaygroundState.NoArtboardMetadata;
             }
 
-            if (m_artboardMetadata.DefaultViewModel == null)
+            // Globals are enough on their own: they are editable even when the artboard has no view
+            // model of its own, and even before a main instance is bound.
+            bool hasGlobals = HasGlobalViewModels();
+
+            if (m_artboardMetadata.DefaultViewModel == null && !hasGlobals)
             {
                 message = "The current artboard has no default ViewModel.";
                 return PlaygroundState.NoDefaultViewModel;
@@ -1656,7 +1903,7 @@ namespace Rive.EditorTools
                 return PlaygroundState.WidgetNotLoaded;
             }
 
-            if (m_widget.StateMachine.ViewModelInstance == null)
+            if (m_widget.StateMachine.ViewModelInstance == null && !hasGlobals)
             {
                 message = "No ViewModel instance bound to the state machine.";
                 return PlaygroundState.NoViewModelInstance;
@@ -1746,7 +1993,28 @@ namespace Rive.EditorTools
 
         private ViewModelInstance GetCurrentInstance()
         {
+            // Rows can repaint before the next rebuild, and we shouldn't look up their paths on another file.
+            if (WidgetReloadedSinceBuild())
+            {
+                return null;
+            }
+
             return m_widget?.StateMachine?.ViewModelInstance;
+        }
+
+        /// <summary>
+        /// Resolves the instance currently bound for a global, or null if nothing is bound. Skips a
+        /// disposed state machine so tearing down play mode doesn't log an error per refresh tick.
+        /// </summary>
+        private ViewModelInstance GetGlobalInstance(string name)
+        {
+            var stateMachine = m_widget?.StateMachine;
+            if (stateMachine == null || stateMachine.IsDisposed || WidgetReloadedSinceBuild())
+            {
+                return null;
+            }
+
+            return stateMachine.GetGlobalViewModelInstance(name);
         }
 
         private void BuildViewModelSection(
@@ -1760,7 +2028,8 @@ namespace Rive.EditorTools
             List<PropertyBinding> bindingList = null,
             List<ListPropertyBinding> listBindingList = null,
             FileMetadata metadataContext = null,
-            Func<string, ViewModel> viewModelResolver = null)
+            Func<string, ViewModel> viewModelResolver = null,
+            bool isGlobal = false)
         {
             instanceProvider ??= GetCurrentInstance;
             bindingList ??= m_propertyBindings;
@@ -1803,9 +2072,14 @@ namespace Rive.EditorTools
 
             var vmName = new Label(vmLabel) { style = { unityFontStyleAndWeight = FontStyle.Bold, flexGrow = 1 } };
 
-            var vmPill = new Label(string.IsNullOrEmpty(viewModelNameLabel)
-                ? "View Model"
-                : $"View Model ({viewModelNameLabel})");
+            // A global's row is already labelled with the view model's own name, so the pill would
+            // only repeat it. Everywhere else the label is a property name and the type is the
+            // half worth showing.
+            var vmPill = new Label(isGlobal
+                ? "Global View Model"
+                : string.IsNullOrEmpty(viewModelNameLabel)
+                    ? "View Model"
+                    : $"View Model ({viewModelNameLabel})");
             vmPill.style.unityTextAlign = TextAnchor.MiddleCenter;
             vmPill.style.paddingLeft = 6;
             vmPill.style.paddingRight = 6;
@@ -1816,8 +2090,12 @@ namespace Rive.EditorTools
             vmPill.style.borderTopRightRadius = 4;
             vmPill.style.borderBottomLeftRadius = 4;
             vmPill.style.borderBottomRightRadius = 4;
-            vmPill.style.backgroundColor = new UnityEngine.Color(0.25f, 0.25f, 0.35f, 0.9f);
-            vmPill.style.color = new UnityEngine.Color(0.9f, 0.9f, 1f, 1f);
+            vmPill.style.backgroundColor = isGlobal
+                ? new UnityEngine.Color(0.33f, 0.27f, 0.15f, 0.9f)
+                : new UnityEngine.Color(0.25f, 0.25f, 0.35f, 0.9f);
+            vmPill.style.color = isGlobal
+                ? new UnityEngine.Color(1f, 0.93f, 0.78f, 1f)
+                : new UnityEngine.Color(0.9f, 0.9f, 1f, 1f);
 
             var countLabel = new Label($"{childCount} properties");
             countLabel.style.marginLeft = 6;
@@ -1866,6 +2144,9 @@ namespace Rive.EditorTools
                         break;
                     case ViewModelDataType.AssetImage:
                         AddImageField(container, propertyAccessPath, property.Name, instanceProvider, propertyCachePath, propertyDisplayPath, bindingList);
+                        break;
+                    case ViewModelDataType.AssetFont:
+                        AddFontField(container, propertyAccessPath, property.Name, instanceProvider, propertyCachePath, propertyDisplayPath, bindingList);
                         break;
                     case ViewModelDataType.Artboard:
                         AddArtboardField(container, propertyAccessPath, property.Name, instanceProvider, propertyCachePath, propertyDisplayPath, bindingList);
@@ -1960,6 +2241,8 @@ namespace Rive.EditorTools
                     return InspectorDocLinks.UnityDataBindingViewModel;
                 case ViewModelDataType.AssetImage:
                     return InspectorDocLinks.UnityDataBindingImages;
+                case ViewModelDataType.AssetFont:
+                    return InspectorDocLinks.UnityDataBindingFonts;
                 case ViewModelDataType.List:
                     return InspectorDocLinks.UnityDataBindingLists;
                 case ViewModelDataType.ListIndex:

@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using Rive.Components;
+using Rive.Utils;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UI;
@@ -49,7 +50,9 @@ namespace Rive.EditorTools
         [MenuItem("GameObject/Rive/Widgets/Procedural Rive Widget", false, 13)]
         static void CreateProceduralRiveWidget(MenuCommand menuCommand)
         {
+#pragma warning disable CS0618 // ProceduralRiveWidget is deprecated but still used internally
             GameObject widgetObj = new GameObject("Procedural Rive Widget", typeof(ProceduralRiveWidget));
+#pragma warning restore CS0618
 
             // If we have a context (selected object), try to parent to it
             GameObject parent = menuCommand.context as GameObject;
@@ -203,13 +206,7 @@ namespace Rive.EditorTools
 
         private static UnityEngine.EventSystems.EventSystem GetExistingEventSystem()
         {
-
-#if UNITY_6000_0_OR_NEWER
-            return Object.FindFirstObjectByType<UnityEngine.EventSystems.EventSystem>();
-#else
-            return Object.FindObjectOfType<UnityEngine.EventSystems.EventSystem>();
-#endif
-
+            return ObjectHelper.FindAny<UnityEngine.EventSystems.EventSystem>();
         }
 
         private static void EnsureEventSystemExists()

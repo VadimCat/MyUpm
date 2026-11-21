@@ -15,6 +15,11 @@ namespace Rive
     {
         private ViewModelInstanceSafeHandle m_safeHandle;
 
+        // This holds a pointer to the underlying native ViewModelInstance*, used for identity caching. 
+        // It’s set when the object is created so that Dispose and the finalizer don't need to call native code to find it.
+        // Note: This is not the same pointer as the ViewModelInstanceRuntime* that the SafeHandle uses—this one points to the core object.
+        private readonly CoreViewModelInstancePtr m_coreInstancePtr;
+
         private WeakReference<File> m_riveFile;
 
         // Strong references to subscribed properties keyed by native pointer.
@@ -33,12 +38,20 @@ namespace Rive
         /// </summary>
         private static readonly ConcurrentDictionary<string, string[]> s_pathSegmentsCache = new ConcurrentDictionary<string, string[]>();
 
+        /// <summary>
+        /// Identity cache keyed on the core ViewModelInstance* (not the ViewModelInstanceRuntime*).
+        /// Separate from the primitive property cache so the key spaces do not mix.
+        /// </summary>
+        private static readonly ConcurrentDictionary<CoreViewModelInstancePtr, WeakReference<ViewModelInstance>> s_viewModelInstanceCache =
+            new ConcurrentDictionary<CoreViewModelInstancePtr, WeakReference<ViewModelInstance>>();
+
 
         private bool m_disposed = false;
 
         internal bool IsDisposed => m_disposed;
 
         private string m_viewModelName = null;
+        private string m_name = null;
 
 
         internal File RiveFile
@@ -55,26 +68,77 @@ namespace Rive
 
         internal ViewModelInstanceSafeHandle NativeSafeHandle => m_safeHandle;
 
-        internal string ViewModelName
+#if UNITY_EDITOR
+        /// <summary>
+        /// Gets the number of native references to the core ViewModelInstance managed by this wrapper.
+        /// Returns 0 if this instance is disposed.
+        /// </summary>
+        /// <remarks>
+        /// The value is only useful when comparing two readings to see how the reference count changes.
+        /// The exact number can vary depending on how many places the core system is holding references
+        /// (such as the data context, artboard, state machine, and each ViewModelInstanceRuntime).
+        /// Tests should check that the count changes correctly, not that it hits a specific number.
+        /// Only read this while the wrapper is alive; the wrapper is what keeps the core instance valid.
+        /// </remarks>
+        internal int DebugNativeRefCount
+        {
+            get
+            {
+                if (m_disposed || m_coreInstancePtr.IsNull)
+                {
+                    return 0;
+                }
+
+                return getCoreViewModelInstanceRefCount(m_coreInstancePtr.DebuggingPtrValue);
+            }
+        }
+#endif
+
+        /// <summary>
+        /// The name of the view model that defines this instance.
+        /// </summary>
+        /// <remarks>
+        /// Unlike <see cref="Name"/>, which is this specific instance's editor-assigned name,
+        /// this is the name of the view model definition. Multiple instances can share the
+        /// same view model name while having different instance names.
+        /// </remarks>
+        public string ViewModelName
         {
             get
             {
                 if (m_viewModelName == null && !m_disposed)
                 {
-                    m_viewModelName = Marshal.PtrToStringAnsi(getViewModelNameFromViewModelInstance(NativeSafeHandle));
+                    m_viewModelName = Marshal.PtrToStringAnsi(getViewModelNameFromViewModelInstance(NativeSafeHandle)) ?? string.Empty;
                 }
 
-                return m_viewModelName;
+                return m_viewModelName ?? string.Empty;
             }
         }
 
+        /// <summary>
+        /// The Rive editor-assigned name of this view model instance.
+        /// </summary>
+        /// <remarks>
+        /// Returns an empty string for instances without a name, such as those created with
+        /// <see cref="ViewModel.CreateInstance"/>.
+        /// </remarks>
+        public string Name
+        {
+            get
+            {
+                if (m_name == null && !m_disposed)
+                {
+                    m_name = Marshal.PtrToStringAnsi(getNameFromViewModelInstance(NativeSafeHandle)) ?? string.Empty;
+                }
 
+                return m_name ?? string.Empty;
+            }
+        }
 
-
-        private ViewModelInstance(IntPtr instanceValue, File riveFile)
+        private ViewModelInstance(IntPtr instanceValue, CoreViewModelInstancePtr coreInstancePtr, File riveFile)
         {
             m_safeHandle = new ViewModelInstanceSafeHandle(instanceValue);
-
+            m_coreInstancePtr = coreInstancePtr;
             m_riveFile = new WeakReference<File>(riveFile);
         }
 
@@ -165,21 +229,7 @@ namespace Rive
             var ptr = getViewModelInstanceViewModelProperty(NativeSafeHandle, name);
             if (ptr != IntPtr.Zero)
             {
-                if (TryGetCachedViewModelInstanceForPointer(ptr, out var cachedInstance))
-                {
-                    // If we have already created this instance for this pointer, use it
-                    m_viewModelInstances[name] = cachedInstance;
-
-                    // Let's make sure the parent relationship is set
-
-                    if (!cachedInstance.HasParent(this))
-                    {
-                        cachedInstance.AddParent(this);
-                    }
-
-                    return cachedInstance;
-                }
-
+                // GetOrCreateFromPointer owns cache lookup, ref balancing, and parent linking.
                 var newInstance = GetOrCreateFromPointer(ptr, RiveFile, this);
                 m_viewModelInstances[name] = newInstance;
 
@@ -394,19 +444,15 @@ namespace Rive
 
 
         /// <summary>
-        /// Gets a cached nested view model instance for a given pointer. This is used to avoid creating multiple C# instances of the same underlying native instance.
+        /// Gets a cached view model instance for a given core ViewModelInstance pointer.
         /// </summary>
-        internal static bool TryGetCachedViewModelInstanceForPointer(IntPtr ptr, out ViewModelInstance instance)
+        internal static bool TryGetCachedViewModelInstanceForPointer(CoreViewModelInstancePtr corePtr, out ViewModelInstance instance)
         {
-            if (ViewModelInstanceProperty.TryGetGloballyCachedVMPropertyForPointer(ptr, out var property))
+            if (!corePtr.IsNull &&
+                s_viewModelInstanceCache.TryGetValue(corePtr, out var weakReference) &&
+                weakReference.TryGetTarget(out instance))
             {
-                instance = property as ViewModelInstance;
-
-                if (instance != null)
-                {
-                    return true;
-                }
-                return false;
+                return true;
             }
 
             instance = null;
@@ -414,22 +460,36 @@ namespace Rive
         }
 
         /// <summary>
-        /// Removes a cached view model instance for a given pointer.
-        /// /// </summary>
-        internal static void RemoveGloballyCachedViewModelInstanceForPointer(IntPtr ptr)
+        /// Removes the cache entry for a core ViewModelInstance pointer, but only if it still belongs
+        /// to the given owner (or has already been collected).
+        /// </summary>
+        /// <remarks>
+        /// We don't remove the cache entry if another live wrapper for the same core pointer exists. Unconditional removal risks duplicate wrappers.
+        /// </remarks>
+        private static void RemoveGloballyCachedViewModelInstanceForPointer(CoreViewModelInstancePtr corePtr, ViewModelInstance owner)
         {
-            ViewModelInstanceProperty.RemoveCachedPropertyForPointer(ptr);
+            if (corePtr.IsNull ||
+                !s_viewModelInstanceCache.TryGetValue(corePtr, out var weakReference))
+            {
+                return;
+            }
+
+            if (!weakReference.TryGetTarget(out var cachedInstance) || ReferenceEquals(cachedInstance, owner))
+            {
+                s_viewModelInstanceCache.TryRemove(corePtr, out _);
+            }
         }
 
 
         /// <summary>
-        /// Adds a cached view model instance for a given pointer. This is used to avoid creating multiple C# instances of the same underlying native instance.
+        /// Adds a cached view model instance for a given core ViewModelInstance pointer.
         /// </summary>
-        /// <param name="ptr"></param>
-        /// <param name="instance"></param>
-        internal static void AddCachedViewModelInstanceForPointer(IntPtr ptr, ViewModelInstance instance)
+        internal static void AddCachedViewModelInstanceForPointer(CoreViewModelInstancePtr corePtr, ViewModelInstance instance)
         {
-            ViewModelInstanceProperty.AddGloballyCachedVMPropertyForPointer(ptr, instance);
+            if (!corePtr.IsNull && instance != null)
+            {
+                s_viewModelInstanceCache[corePtr] = new WeakReference<ViewModelInstance>(instance);
+            }
         }
 
 
@@ -637,6 +697,16 @@ namespace Rive
         }
 
         /// <summary>
+        /// Gets a font property of the view model instance.
+        /// </summary>
+        /// <param name="path">The path to the property.</param>
+        /// <returns>The font property, or null if the property doesn't exist or is not a font type.</returns>
+        public ViewModelInstanceFontProperty GetFontProperty(string path)
+        {
+            return GetProperty<ViewModelInstanceFontProperty>(path);
+        }
+
+        /// <summary>
         /// Gets a list property of the view model instance.
         /// </summary>
         /// <param name="path">The path to the property.</param>
@@ -703,12 +773,11 @@ namespace Rive
 
             if (m_safeHandle != null && !m_safeHandle.IsInvalid)
             {
-                // Get the IntPtr for cache removal before disposing
-                IntPtr nativePtr = m_safeHandle.DangerousGetHandle();
                 m_safeHandle.Dispose();
-
-                RemoveGloballyCachedViewModelInstanceForPointer(nativePtr);
             }
+
+            // Remove by the stored core pointer, we avoid P/Invoking from the finalizer path.
+            RemoveGloballyCachedViewModelInstanceForPointer(m_coreInstancePtr, this);
 
             m_disposed = true;
 
@@ -724,20 +793,24 @@ namespace Rive
         }
 
         /// <summary>
-        /// Helper method to get or create a ViewModelInstance from a native pointer.
-        /// This method checks if the instance already exists in the cache. If it does, it returns the existing instance so that a single C# instance is always used for the same native instance no matter which method returns it.
-        /// If it doesn't exist, it creates a new ViewModelInstance and adds it to the cache.
+        /// Helper method to get or create a ViewModelInstance from a native ViewModelInstanceRuntime pointer.
+        /// Identity is keyed on the core ViewModelInstance* so every wrapping path resolves to the same C# object.
         /// </summary>
-        /// <param name="instancePtr"> The native pointer to the ViewModelInstance.</param>
+        /// <param name="instancePtr"> The native pointer to the ViewModelInstanceRuntime.</param>
         /// <param name="riveFile"> The Rive file associated with the ViewModelInstance. This is used to resolve the file context for the instance.</param>
         /// <param name="parent"> The parent ViewModelInstance, if any. The parent is used to propagate callbacks to this instance. A vm instance can have multiple parents.</param>
         /// <returns>The ViewModelInstance associated with the native pointer.</returns>
         internal static ViewModelInstance GetOrCreateFromPointer(IntPtr instancePtr, File riveFile, ViewModelInstance parent = null)
         {
-            if (TryGetCachedViewModelInstanceForPointer(instancePtr, out ViewModelInstance existingInstance))
+            if (instancePtr == IntPtr.Zero)
             {
-                // Unity already owns this - balance the extra ref from underlying native methods.
-                // If we don't do this, the native instance might stay in memory longer than intended.
+                return null;
+            }
+
+            var corePtr = new CoreViewModelInstancePtr(getCoreViewModelInstancePointer(instancePtr));
+            if (TryGetCachedViewModelInstanceForPointer(corePtr, out ViewModelInstance existingInstance))
+            {
+                // Unity already owns this, we balance the extra ref from the freshly wrapped runtime.
                 ViewModelInstanceSafeHandle.unrefViewModelInstance(instancePtr);
                 if (parent != null)
                 {
@@ -746,12 +819,12 @@ namespace Rive
                 return existingInstance;
             }
 
-            var newInstance = new ViewModelInstance(instancePtr, riveFile);
+            var newInstance = new ViewModelInstance(instancePtr, corePtr, riveFile);
             if (parent != null)
             {
                 newInstance.AddParent(parent);
             }
-            AddCachedViewModelInstanceForPointer(instancePtr, newInstance);
+            AddCachedViewModelInstanceForPointer(corePtr, newInstance);
             return newInstance;
         }
 
@@ -778,6 +851,19 @@ namespace Rive
         [DllImport(NativeLibrary.name)]
         private static extern IntPtr getViewModelNameFromViewModelInstance(ViewModelInstanceSafeHandle instanceValue);
 
+        [DllImport(NativeLibrary.name)]
+        private static extern IntPtr getNameFromViewModelInstance(ViewModelInstanceSafeHandle instanceValue);
+
+        // Returns the borrowed core ViewModelInstance*. Wrap in CoreViewModelInstancePtr at the call
+        // site rather than typing the extern, so nothing depends on struct return marshalling.
+        [DllImport(NativeLibrary.name)]
+        private static extern IntPtr getCoreViewModelInstancePointer(IntPtr instancePtr);
+
+#if UNITY_EDITOR
+        [DllImport(NativeLibrary.name)]
+        private static extern int getCoreViewModelInstanceRefCount(IntPtr coreInstancePtr);
+#endif
+
 
         /// <summary>
         /// Replaces a nested view model instance property with a new instance.
@@ -788,6 +874,7 @@ namespace Rive
         /// <returns>True if the view model property was replaced, false otherwise. E.g. If the view model instance provided is for a different view model, the
         /// replacement will fail.</returns>
         [DllImport(NativeLibrary.name)]
+        [return: MarshalAs(UnmanagedType.U1)]
         private static extern bool replaceViewModelInstanceViewModelProperty(
             ViewModelInstanceSafeHandle baseInstanceValue,
             string path,
@@ -795,6 +882,39 @@ namespace Rive
 
 
         #endregion
+    }
+
+    /// <summary>
+    /// A borrowed pointer to the core native ViewModelInstance that a ViewModelInstanceRuntime wraps.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="ViewModelInstanceSafeHandle"/>, which owns a ViewModelInstanceRuntime*
+    /// and unrefs it on release. This pointer is only ever used as an identity key: it is never ref'd,
+    /// unref'd, or dereferenced, so it deliberately is not a SafeHandle. The separate type keeps the two
+    /// pointer kinds from being passed to each other's APIs.
+    /// </remarks>
+    internal readonly struct CoreViewModelInstancePtr : IEquatable<CoreViewModelInstancePtr>
+    {
+        private readonly IntPtr m_value;
+
+        internal CoreViewModelInstancePtr(IntPtr value)
+        {
+            m_value = value;
+        }
+
+        internal bool IsNull => m_value == IntPtr.Zero;
+
+#if UNITY_EDITOR
+        // Only the refcount checker actually uses the pointer value as an address.
+        // In all other cases, this pointer just acts as a unique identifier (key) and isn't accessed directly.
+        internal IntPtr DebuggingPtrValue => m_value;
+#endif
+
+        public bool Equals(CoreViewModelInstancePtr other) => m_value == other.m_value;
+
+        public override bool Equals(object obj) => obj is CoreViewModelInstancePtr other && Equals(other);
+
+        public override int GetHashCode() => m_value.GetHashCode();
     }
 
     /// <summary>

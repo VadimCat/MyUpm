@@ -28,12 +28,14 @@ namespace Rive
         }
 
         private IntPtr m_nativeFile;
-        private readonly int? m_assetKey;
+        private readonly long? m_assetKey;
         private bool m_isDisposed = false;
 
         private ViewModel[] m_viewModels;
 
         private ViewModelEnumData[] m_viewModelEnums;
+
+        private string[] m_globalViewModelNames;
 
 
 
@@ -76,7 +78,7 @@ namespace Rive
             get { return m_fallbackFileAssetLoader; }
         }
 
-        internal int? AssetKey
+        internal long? AssetKey
         {
             get { return m_assetKey; }
         }
@@ -109,6 +111,23 @@ namespace Rive
                     m_viewModelEnums = GetViewModelEnums();
                 }
                 return m_viewModelEnums;
+            }
+        }
+
+        /// <summary>
+        /// The names of the file's global view models, in file order. These are the keys accepted by
+        /// <see cref="StateMachine.BindViewModelInstance(ViewModelInstance, IReadOnlyDictionary{string, ViewModelInstance})"/>
+        /// and <see cref="StateMachine.GetGlobalViewModelInstance"/>.
+        /// </summary>
+        public IReadOnlyList<string> GlobalViewModelNames
+        {
+            get
+            {
+                if (m_globalViewModelNames == null)
+                {
+                    m_globalViewModelNames = LoadGlobalViewModelNames();
+                }
+                return m_globalViewModelNames;
             }
         }
 
@@ -219,7 +238,7 @@ namespace Rive
         static public File Load(TextAsset asset)
         {
             // With text assets, we don't have the embedded asset data ahead of time, but we still want them to be cached if the same asset is loaded multiple times.
-            return s_fileLoader.LoadWithKnownAssets(asset.bytes, asset.GetInstanceID(), null);
+            return s_fileLoader.LoadWithKnownAssets(asset.bytes, ObjectHelper.GetInstanceId(asset), null);
         }
 
         /// <summary>
@@ -232,7 +251,7 @@ namespace Rive
         /// </remarks>
         static public File Load(Asset asset)
         {
-            return s_fileLoader.LoadWithKnownAssets(asset.Bytes, asset.GetInstanceID(), asset.EmbeddedAssets);
+            return s_fileLoader.LoadWithKnownAssets(asset.Bytes, ObjectHelper.GetInstanceId(asset), asset.EmbeddedAssets);
         }
 
         /// <summary>
@@ -269,9 +288,9 @@ namespace Rive
         /// <summary>
         /// Update the embedded asset reference data in the Rive file. The out-of-band asset must be loaded before calling this method.
         /// </summary>
-        /// <param name="assetIndex"></param>
+        /// <param name="assetId"></param>
         /// <param name="asset"></param>
-        internal void UpdateEmbeddedAssetReference(nuint assetIndex, OutOfBandAsset asset)
+        internal void UpdateEmbeddedAssetReference(uint assetId, OutOfBandAsset asset)
         {
             if (asset == null)
             {
@@ -285,11 +304,11 @@ namespace Rive
                 return;
             }
 
-            bool wasUpdated = NativeFileInterface.updateEmbeddedAssetReferenceInFile(NativeFile, assetIndex, asset.NativeAsset);
+            bool wasUpdated = NativeFileInterface.updateEmbeddedAssetReferenceInFileById(NativeFile, assetId, asset.NativeAsset);
 
             if (!wasUpdated)
             {
-                DebugLogger.Instance.LogError($"{LogCodes.ERROR_ASSET_REFERENCE_UPDATE_FAILED}: - Asset reference with index {assetIndex} not found in the file. Could the Rive file you loaded be different from the one you are trying to update?");
+                DebugLogger.Instance.LogError($"{LogCodes.ERROR_ASSET_REFERENCE_UPDATE_FAILED}: - Asset reference with id {assetId} not found in the file. Could the Rive file you loaded be different from the one you are trying to update?");
             }
 
 
@@ -297,7 +316,7 @@ namespace Rive
 
 
 
-        internal File(IntPtr nativeFile, int? assetKey, IFallbackFileAssetLoader fallbackFileAssetLoader)
+        internal File(IntPtr nativeFile, long? assetKey, IFallbackFileAssetLoader fallbackFileAssetLoader)
         {
             m_nativeFile = nativeFile;
             m_assetKey = assetKey;
@@ -491,6 +510,31 @@ namespace Rive
             }
         }
 
+        private string[] LoadGlobalViewModelNames()
+        {
+            if (!IsNativeFileValid())
+            {
+                return Array.Empty<string>();
+            }
+
+            IntPtr namesList = NativeFileInterface.getGlobalViewModelNamesList(NativeFile);
+            if (namesList == IntPtr.Zero)
+            {
+                return Array.Empty<string>();
+            }
+
+            int count = (int)NativeFileInterface.getGlobalViewModelNamesCount(namesList);
+            string[] names = new string[count];
+            for (int i = 0; i < count; i++)
+            {
+                IntPtr namePtr = NativeFileInterface.getGlobalViewModelNameAtIndex(namesList, (nuint)i);
+                names[i] = Marshal.PtrToStringAnsi(namePtr);
+            }
+
+            NativeFileInterface.freeGlobalViewModelNamesList(namesList);
+            return names;
+        }
+
 
         private ViewModelEnumData[] GetViewModelEnums()
         {
@@ -545,6 +589,7 @@ namespace Rive
         internal static extern void unrefRiveFile(IntPtr riveFile);
 
         [DllImport(NativeLibrary.name)]
+        [return: MarshalAs(UnmanagedType.U1)]
         internal static extern bool isRiveFileValid(IntPtr riveFile);
         [DllImport(NativeLibrary.name)]
         internal static extern uint getArtboardCount(IntPtr riveFile);
@@ -562,10 +607,11 @@ namespace Rive
         internal static extern IntPtr instanceArtboardWithName(IntPtr riveFile, string name);
 
         [DllImport(NativeLibrary.name)]
-        internal static extern bool updateEmbeddedAssetReferenceInFile(IntPtr riveFile, nuint assetIndex, IntPtr decodedAsset);
+        [return: MarshalAs(UnmanagedType.U1)]
+        internal static extern bool updateEmbeddedAssetReferenceInFileById(IntPtr riveFile, uint assetId, IntPtr decodedAsset);
 
         [DllImport(NativeLibrary.name)]
-        internal static extern void clearAssignedAssetReferenceValue(IntPtr riveFile, nuint assetIndex);
+        internal static extern void clearAssignedAssetReferenceValueById(IntPtr riveFile, uint assetId);
 
         [DllImport(NativeLibrary.name)]
         internal static extern IntPtr loadRiveFileWithUnityCallback(byte[] riveFileBytes, uint byteCount, NativeUnityAssetLoaderCallback callback);
@@ -616,6 +662,18 @@ namespace Rive
 
         [DllImport(NativeLibrary.name)]
         internal static extern IntPtr getEnumValueAtFileEnumIndex(IntPtr riveFile, nuint enumIndex, nuint valueIndex);
+
+        [DllImport(NativeLibrary.name)]
+        internal static extern IntPtr getGlobalViewModelNamesList(IntPtr riveFile);
+
+        [DllImport(NativeLibrary.name)]
+        internal static extern nuint getGlobalViewModelNamesCount(IntPtr namesList);
+
+        [DllImport(NativeLibrary.name)]
+        internal static extern IntPtr getGlobalViewModelNameAtIndex(IntPtr namesList, nuint index);
+
+        [DllImport(NativeLibrary.name)]
+        internal static extern void freeGlobalViewModelNamesList(IntPtr namesList);
 
         #endregion
 
